@@ -1,0 +1,225 @@
+#! /usr/bin/env python
+
+import sys
+import os
+import inspect
+
+
+# these variables are mandatory ('/' are converted automatically)
+top = '.'
+out = 'build'
+
+android_sdl_path = 'SDL2-android'
+
+
+def options(ctx):
+	waf_tools = ctx.path.find_node('external/waf-tools')
+
+	ctx.load('compiler_c compiler_cxx')
+	ctx.load('android-gxx android-gcc android-ar', tooldir = str(waf_tools))
+	ctx.add_option('-d', '--debug', dest='debug_build', default=False, action='store_true', help='Enables debug builds')
+	ctx.add_option('--android', dest='android_build', default=False, action='store_true', help='Enables android client builds')
+
+
+
+def configure(ctx):
+	ctx.env.debug_build = ctx.options.debug_build
+	ctx.env.android_build = ctx.options.android_build
+	ctx.env.headless_build = ctx.options.headless_build
+	ctx.env.emscripten_build = ctx.options.emscripten_build
+
+
+	compile_flags = ['-std=c++14', '-Wall', '-Wextra', '-Werror=return-type',
+		'-Wstrict-aliasing', '-fstrict-aliasing']
+
+	if ctx.options.debug_build:
+		compile_flags += ['-g']
+
+	elif ctx.env.android_build:
+		waf_tools = ctx.path.find_node('external/waf-tools')
+		ctx.load('android-gxx android-gcc android-ar', tooldir = str(waf_tools))
+
+	else:
+		ctx.find_program('clang++', var = 'CXX', mandatory = True)
+		ctx.find_program('clang', var = 'CC', mandatory = True)
+
+		ctx.load('compiler_c compiler_cxx')
+
+		if not ctx.env.headless_build:
+			ctx.check_cfg(path='sdl2-config', args='--cflags --libs', package='', uselib_store='SDL2')
+
+	ctx.env.CXXFLAGS += compile_flags
+
+	if not ctx.env.headless_build:
+		if sys.platform == 'darwin':
+			ctx.env.FRAMEWORK_GL = ['OpenGL']
+		elif not ctx.env.android_build and not ctx.env.emscripten_build:
+			ctx.check_cfg(package='gl', args='--cflags --libs', uselib_store='GL')
+
+
+def build(ctx):
+	link_flags = ['-Wl', '-Wl,-rpath,.']
+
+	if ctx.env.debug_build:
+		link_flags += ['-g']
+
+	external_node = ctx.path.find_node('external')
+	cpp_scr_node = ctx.path.find_node('src')
+
+	lib_compile_flags = ['-O2']
+
+	use_libs = []
+	defines = []
+
+	if not ctx.env.headless_build:
+		use_libs += ['GL']
+	else:
+		defines += ['FORCE_HEADLESS']
+
+	if ctx.env.android_build:
+		#sdl_node = external_node.find_node(android_sdl_path)
+		ctx.env.NDK_BUILD = os.path.join(ctx.env.NDK_ROOT, "ndk-build")
+
+		#ctx(rule='cd ${SRC}; ${NDK_BUILD}', source=sdl_node)
+		#libdir = sdl_node.make_node("libs/armeabi-v7a/")
+		#ctx.add_group()
+
+		#sdl_main = external_node.find_node(android_sdl_path + '/jni/SDL/src/main/android/SDL_android_main.c')
+		main_file = cpp_scr_node.find_node('main.cpp')
+		client_module = ctx.shlib(
+			source			= [main_file],
+			target			= 'main_client',
+			use				= use_libs,
+			linkflags		= link_flags,
+			defines			= defines,
+		)
+
+		build_apk(ctx, client_module)
+
+	else:
+		print('TODO TODO')
+		ctx.program(
+			source			= ['client.cpp', 'client_yojimbo.cpp'],
+			target			= 'client',
+			use				= use_libs,
+			linkflags		= link_flags,
+			defines			= defines,
+		)
+
+
+def build_apk(ctx, module):
+	# Force the build task
+	module.post()
+	output = module.tasks[-1].outputs[0]
+
+	ctx.env.STRIP = ctx.root.find_node(ctx.env.GCC_TOOLCHAIN_DIR+"/bin/arm-linux-androideabi-strip").abspath()
+
+	# Create build dir
+	template_dir = ctx.path.find_node('android_template')
+	android_output = ctx.path.make_node('build/android')
+	android_output.mkdir()
+
+	project = android_output.make_node(module.name)
+	project.mkdir()
+
+	print(project)
+
+	conf = {
+		'package_id': 'org.isqg.'+module.name,
+		'package_label': module.name,
+	}
+
+	# Fill in and copy config to stage
+	def stage_config(tsk):
+		conf_files = ["AndroidManifest.xml", "build.gradle", "gradle.properties"]
+		for f in conf_files:
+			template = template_dir.find_node(f)
+			confoutput = project.make_node(f)
+			contents = template.read()
+
+			for (key, value) in conf.items():
+				contents = contents.replace("${" + key + "}", value)
+
+			confoutput.write(contents)
+
+	ctx(rule=stage_config, name='stage_config_' + module.name, always=True)
+	ctx(rule='cp -fr ${SRC} ${TGT}', source=template_dir.find_node('src'), target=project, always=True)
+
+	ctx.add_group()
+
+	projectlibtarget = project.make_node('lib/armeabi-v7a/')
+
+	# Install and strip runtime
+	libsrc = ctx.root.find_node("%s/sources/cxx-stl/llvm-libc++/libs/armeabi-v7a/" % ctx.env.NDK_ROOT).find_node('libc++_shared.so')
+	libtrg = projectlibtarget.make_node('libc++_shared.so')
+
+	ctx(rule='${STRIP} --strip-unneeded ${SRC} -o ${TGT}', source=libsrc, target=libtrg)
+
+	# Install and strip sdl libs
+	"""
+	sdllibsource = ctx.path.make_node("external/%s/libs/armeabi-v7a/" % android_sdl_path)
+	print(sdllibsource)
+
+	for lib in ['SDL2', 'SDL2_image', 'SDL2_ttf']:
+		libname = 'lib%s.so' % lib
+		libsrc = sdllibsource.make_node(libname)
+		libtrg = projectlibtarget.make_node(libname)
+
+		# ctx(rule='cp -f ${SRC} ${TGT}', source=libsrc, target=libtrg, always=True)
+		ctx(rule='${STRIP} --strip-unneeded ${SRC} -o ${TGT}', source=libsrc, target=libtrg)
+	"""
+
+	# Copy native binary to stage and strip
+	libmainpath = projectlibtarget.make_node('libmain.so')
+	# ctx(rule='cp -f ${SRC} ${TGT}', name="stage_module_" + module.name, source=output, target=libmainpath, always=True)
+	ctx(rule='${STRIP} --strip-unneeded ${SRC} -o ${TGT}', name="stage_module_" + module.name, source=output, target=libmainpath, always=True)
+
+	# Generate wrapper to let us use a unique app id
+	"""
+	def generate_wrapper(tsk):
+		wrapperdir = project.make_node('src/org/isqg/'+module.name)
+		wrapper = wrapperdir.make_node('DumbWrapperSDLActivity.java')
+		wrapperdir.mkdir()
+
+		wrapper.write("package %s;\n import org.libsdl.app.SDLActivity;\n public class DumbWrapperSDLActivity extends SDLActivity { }\n"
+			% conf['package_id'])
+
+
+	ctx(rule=generate_wrapper, name='generate_wrapper_' + module.name, always=True)
+	"""
+
+	srcassets = ctx.path.find_node('assets')
+
+	if not srcassets is None:
+		tgtassets = project.make_node('assets')
+		ctx(rule='ln -fs ${SRC[0].abspath()} ${TGT}', name='link_assets_'+module.name, source=srcassets, target=tgtassets)
+
+	ctx.add_group()
+
+	# Assemble apk and copy to build/apks
+	apkname = module.name+'-debug.apk'
+	apk = project.make_node('build/outputs/apk').make_node(apkname)
+	apkdir = output.parent.make_node('apks')
+	apkdir.mkdir()
+
+	apktgt = apkdir.make_node(apkname)
+
+	ctx(rule='cd ${SRC}; gradle assemble', name='assemble', source=project, target=apk, depends_on='build_module_' + module.name, always=True)
+	ctx(rule='cp -f ${SRC} ${TGT}', source=apk, target=apktgt, always=True)
+
+
+def deploy(ctx):
+	if not ctx.env.android_build:
+		return
+
+	# TODO: Configure? Also check ANDROID_HOME I think
+	ctx.env.ADB = os.environ["ANDROID_SDK_ROOT"] + "/platform-tools/adb"
+
+	for apk in ctx.bldnode.find_dir('apks').ant_glob('*-debug.apk'):
+		ctx(rule = '${ADB} install -r ${SRC}', source=apk, always=True)
+
+
+from waflib.Build import BuildContext
+class deploy_ctx(BuildContext):
+	cmd = 'deploy'
+	fun = 'deploy'

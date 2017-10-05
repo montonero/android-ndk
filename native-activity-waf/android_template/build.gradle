@@ -1,0 +1,48 @@
+apply plugin: 'com.android.application'
+
+buildscript {
+	repositories {
+		mavenCentral()
+		maven { url 'https://maven.fabric.io/public' }
+	}
+
+	dependencies {
+		classpath 'com.android.tools.build:gradle:2.3.0'
+	}
+}
+
+android {
+	compileSdkVersion 25
+	buildToolsVersion "25.0.0"
+
+	defaultConfig {
+		applicationId = '${package_id}'
+
+		minSdkVersion 19
+		targetSdkVersion 25
+	}
+
+	sourceSets {
+		main {
+			manifest.srcFile 'AndroidManifest.xml'
+			jni.srcDirs = []
+			
+			java.srcDir 'src'
+			jniLibs.srcDir 'lib'
+			assets.srcDir 'assets'
+		}
+	}
+
+	buildTypes {
+		release {
+			minifyEnabled false
+		}
+		debug {
+			minifyEnabled false
+		}
+	}
+
+	lintOptions {
+		abortOnError false
+	}
+}
